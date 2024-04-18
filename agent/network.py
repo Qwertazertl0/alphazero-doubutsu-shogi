@@ -1,9 +1,9 @@
 import torch
 import torch.nn as nn
-from game_state import TIME_HISTORY
+from game_state import STATE_PLANES, TIME_STEPS
 
 class ResBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, stride=1):
+    def __init__(self, in_channels, out_channels, stride=1) -> None:
         super(ResBlock, self).__init__()
         
         self.conv_block = nn.Sequential(
@@ -15,7 +15,7 @@ class ResBlock(nn.Module):
         )
         self.relu = nn.ReLU(inplace=True)
         
-    def forward(self, x):
+    def forward(self, x) -> torch.Tensor:
         identity = x
         out = self.conv_block(x)
         out += identity
@@ -29,7 +29,7 @@ class AgentNetwork(nn.Module):
 
         # Main network
         self.network = nn.Sequential(
-            nn.Conv2d(18 * TIME_HISTORY + 2, num_filters, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(STATE_PLANES * TIME_STEPS, num_filters, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(num_filters),
             nn.ReLU(),
             *[ResBlock(num_filters, num_filters) for _ in range(num_blocks)]
@@ -54,7 +54,7 @@ class AgentNetwork(nn.Module):
             nn.Tanh()
         )
 
-    def forward(self, x):
+    def forward(self, x) -> tuple[torch.Tensor, torch.Tensor]:
         latent = self.network(x)
         policy = self.policy_head(latent)
         policy = torch.reshape(policy, (12, 4, 3))
