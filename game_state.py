@@ -1,5 +1,6 @@
 import torch
 from typing import Optional, Sequence, Union
+from collections import defaultdict
 
 TOTAL_NODE_COUNT = 0
 
@@ -74,6 +75,7 @@ def get_actions(state: Union[ShogiState, torch.Tensor]) -> torch.Tensor:
         state = state.state
     
     pieces = state[:5].sum(dim=0)
+    empty = 1-pieces
     krpc = pieces - state[1]
     kbc = pieces - state[2] - state[3]
     kb = kbc - state[4]
@@ -94,20 +96,21 @@ def get_actions(state: Union[ShogiState, torch.Tensor]) -> torch.Tensor:
                 bounds[-1,:] = True
             elif j == -1:
                 bounds[0,:] = True
-            moveable = (move_pieces.roll(shifts=(j,i), dims=(0,1)) & ~pieces).roll(shifts=(-j,-i), dims=(0,1))
+            moveable = (move_pieces.roll(shifts=(j,i), dims=(0,1)) & empty).roll(shifts=(-j,-i), dims=(0,1))
             action_planes[m] = move_pieces & ~bounds & moveable
 
     # promotions
-    action_planes[8] = ~pieces & state[3]
+    action_planes[8] = empty & state[3]
     action_planes[0] ^= state[3] & torch.tensor([[0,0,0],[1,1,1],[0,0,0],[0,0,0]], dtype=bool)
 
     # drops
+    empty_drop = 1-state[:10].sum(dim=0)
     if state[12][0,0] > 0:
-        action_planes[9] = ~pieces
+        action_planes[9] = empty_drop
     if state[13][0,0] > 0:
-        action_planes[10] = ~pieces
+        action_planes[10] = empty_drop
     if state[14][0,0] > 0:
-        action_planes[11] = ~pieces
+        action_planes[11] = empty_drop
 
     return action_planes
 
@@ -115,6 +118,7 @@ def check_end(state: Union[ShogiState, torch.Tensor], actions=None) -> Optional[
     '''Check assumed valid ShogiState and return -1/0/1 for current player loss/draw/win or None if game is not over'''
     if type(state) == ShogiState:
         state = state.state
+
     # check for captured king
     if state[0].sum() == 0:
         return -1
@@ -136,9 +140,52 @@ def check_end(state: Union[ShogiState, torch.Tensor], actions=None) -> Optional[
     
     return actions
 
-def execute_action(state: ShogiState, action: Sequence[int]) -> ShogiState:
+def execute_action(state: ShogiState, state_counts: defaultdict, action: int) -> None:
     '''Given state-action pair (s, a), return resulting state'''
-    pass
+    plane = action // 12
+    r = action % 12 // COLS
+    c = action % COLS
+
+    # update board state and captures if needed
+    if plane < 8:
+        piece = state.state[:5,r,c]
+        dc = 1 if plane in [1,2,3] else (0 if plane in [0,4] else -1)
+        dr = 1 if plane in [3,4,5] else (0 if plane in [2,6] else -1)
+        if state.state[5:10,r+dr,c+dc].sum():
+            p = torch.argmax(state.state[5:10,r+dr,c+dc])
+            if p > 0:
+                state.state[[None,12,13,14,14][p]] += 1
+            state.state[5:10,r+dr,c+dc] = 0
+        state.state[:5,r+dr,c+dc] = piece
+        state.state[:5,r,c] = 0
+    elif plane == 8:
+        assert(r == 1)
+        state.state[3,r,c] = 0
+        state.state[4,r-1,c] = 1
+    else:
+        state.state[plane-8,r,c] = 1
+        state.state[plane+3] -= 1
+
+    # flip board and captures and color and update move count
+    state.state[:10,:,:] = torch.flip(state.state[:10,:,:], dims=[1])
+    state.state[:5,:,:], state.state[5:10,:,:] = state.state[5:10,:,:].clone(), state.state[:5,:,:].clone()
+    state.state[12:15,:,:], state.state[15:18,:,:] = state.state[15:18,:,:].clone(), state.state[12:15,:,:].clone()
+    state.state[-2] = 1 - state.state[-2]
+    state.state[-1] += 1
+
+    # update repetitions and state counts
+    state_repr = state.__repr__()[:31]
+    state_counts[state_repr] += 1
+    if state_counts[state_repr] == 1:
+        state.state[10:12] = 0
+    elif state_counts[state_repr] == 2:
+        state.state[10] = 1
+        state.state[11] = 0
+    elif state_counts[state_repr] == 3:
+        state.state[10:12] = 1
+
+    # update state history (for TIME_STEPS > 1)
+    # TODO
 
 class ShogiNode():
     '''
