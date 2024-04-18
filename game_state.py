@@ -1,6 +1,7 @@
 import torch
 from typing import Optional, Sequence, Union
 from collections import defaultdict
+from mcts import AbstractNode
 
 TOTAL_NODE_COUNT = 0
 
@@ -114,37 +115,47 @@ def get_actions(state: Union[ShogiState, torch.Tensor]) -> torch.Tensor:
 
     return action_planes
 
-def check_end(state: Union[ShogiState, torch.Tensor], actions=None) -> Optional[int]:
-    '''Check assumed valid ShogiState and return -1/0/1 for current player loss/draw/win or None if game is not over'''
+def get_action_index(action: int) -> tuple[int, int, int]:
+    plane = action // 12
+    r = action % 12 // COLS
+    c = action % COLS
+    return plane, r, c
+
+def check_end(state: Union[ShogiState, torch.Tensor], actions=None) -> Optional[Union[int, torch.Tensor]]:
+    '''
+    Check assumed valid ShogiState and return -1/0/1 for sente player loss/draw/win or None if game is not over.
+    Also returns actions to avoid recomputation if needed'''
     if type(state) == ShogiState:
         state = state.state
 
+    loss_val = -1 if state[-2,0,0] == 0 else 1
     # check for captured king
     if state[0].sum() == 0:
-        return -1
+        return loss_val
     
     # check try rule
+    ret_action = False
     if not actions:
+        ret_action = True
         actions = get_actions(state)
     if (state[5] & torch.tensor([[0,0,0],[0,0,0],[0,0,0],[1,1,1]], dtype=bool)).sum():
         if state[5,3,0] and (actions[4,2,0] + actions[5,2,1] + actions[6,3,1]) == 0:
-            return -1
+            return loss_val
         elif state[5,3,1] and (actions[2,3,0] + actions[3,2,0] + actions[4,2,1] + actions[5,2,2] + actions[6,3,2]) == 0:
-            return -1
+            return loss_val
         elif state[5,3,2] and (actions[2,3,1] + actions[3,2,1] + actions[4,2,2]) == 0:
-            return -1
+            return loss_val
 
     # check repetition count
     if state[11,0,0]:
         return 0
     
-    return actions
+    if ret_action:
+        return actions
 
 def execute_action(state: ShogiState, state_counts: defaultdict, action: int) -> None:
     '''Given state-action pair (s, a), return resulting state'''
-    plane = action // 12
-    r = action % 12 // COLS
-    c = action % COLS
+    plane, r, c = get_action_index(action)
 
     # update board state and captures if needed
     if plane < 8:
@@ -186,13 +197,14 @@ def execute_action(state: ShogiState, state_counts: defaultdict, action: int) ->
 
     # update state history (for TIME_STEPS > 1)
     # TODO
-
-class ShogiNode():
+    
+class ShogiNode(AbstractNode):
     '''
     Node wrapping state and action for MCTS
     '''
-    def __init__(self, state=None, actions=None) -> None:
-        self.children = []
+    def __init__(self, in_action: int, parent=None, state=None) -> None:
+        self.parent = parent
+        self.children = {}
 
         # Actions (12): Order
         # 1 unit in each cardinal direction and diagonals (8): N, NE, E, SE, S, SW, W, NW
@@ -203,6 +215,67 @@ class ShogiNode():
         if state:
             self._state.state = state
         self.state = self._state.state
+        self.actions = get_actions(self.state)
+        self.in_action = in_action
+        self._is_over = None
 
     def __repr__(self) -> str:
         return self._state.__repr__()
+    
+    def is_over(self) -> bool:
+        if self._is_over is not None:
+            return isinstance(self._is_over, int)
+        ret = check_end(self.state, self.actions)
+        if isinstance(ret, int):
+            self._is_over = ret
+            return True
+        self._is_over = False
+        return False
+    
+    def select_rollout_action(self, c_puct: float) -> torch.Tensor:
+        u = c_puct * self.edges[3] * torch.sqrt(self.edges[0].sum()) / (1 + self.edges[0])
+        return torch.argmax(self.edges[2] + u)
+
+    def execute_action(self, action) -> "AbstractNode":
+        child_state = self.state.clone()
+        execute_action(child_state, action)
+        child = ShogiNode(self, child_state)
+        self.children[action] = child
+        return child
+    
+    def evaluate(self, agent) -> float:
+        if self._is_over is None:
+            ret = check_end(self.state, self.actions)
+            if isinstance(ret, int):
+                self._is_over = ret
+            else:
+                self._is_over = False
+        
+        if isinstance(self._is_over, int):
+            return self._is_over
+        else:
+            p, v = agent(self.state)
+            self.edges[3] = p
+            return v
+    
+    def backup(self, value: float, root: "ShogiNode") -> None:
+        self._backup(value, root, self.in_action)
+
+    def _backup(self, value: float, root: "ShogiNode", in_action: int) -> None:
+        if self == root:
+            return
+        
+        p, r, c = get_action_index(in_action)
+        self.parent.edges[0, p, r, c] += 1
+        self.parent.edges[1, p, r, c] += value
+        self.parent.edges[2, p, r, c] = self.parent.edges[1, p, r, c] / self.parent.edges[0, p, r, c]
+        self.parent._backup(value, root, self.parent.in_action)
+    
+    def get_search_vector(self, temp: float) -> torch.Tensor:
+        if temp == 0:
+            amax = self.edges[0].argmax()
+            vec = torch.zeros_like(self.edges[0])
+            vec[get_action_index(amax)] = 1
+            return vec
+        n = torch.pow(self.edges[0], temp)
+        return n / n.sum()
