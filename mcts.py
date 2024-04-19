@@ -5,9 +5,11 @@ from typing import Any
 import threading
 import queue
 import torch
+from collections import defaultdict
+import copy
 from abc import abstractmethod, ABCMeta
 
-class AbstractNode(ABCMeta):
+class AbstractNode():
     @abstractmethod
     def is_over(self) -> bool:
         return
@@ -39,23 +41,24 @@ class MCTS():
         self.temperature = temp
         self.n_rollouts = n_rollouts
 
-    def run_tree_search(self, root: AbstractNode) -> torch.Tensor:
+    def run_tree_search(self, root: AbstractNode, game_state_counts: defaultdict) -> torch.Tensor:
         '''Performs Monte Carlo Tree Search and returns search vector'''
         # TODO: multithreaded search
         
         # At current node, build vector \pi
-        for _ in self.n_rollouts:
+        for _ in range(self.n_rollouts):
             curr_inner = root
+            gsc = copy.deepcopy(game_state_counts)
             while not curr_inner.is_over():
                 # Choose action via PUCT algorithm
                 a = curr_inner.select_rollout_action(self.c_puct)
 
                 # Expand and evaluate
-                child = curr_inner.execute_action(a)
+                child = curr_inner.execute_action(a, gsc)
                 v = child.evaluate(self.agent)
                 
                 # Backup
-                curr_inner.backup(v, root)
+                child.backup(v, root)
                 curr_inner = child
 
         # Return search vector \pi
