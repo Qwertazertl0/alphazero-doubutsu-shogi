@@ -9,16 +9,16 @@ class ResBlock(nn.Module):
         self.conv_block = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=False),
             nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False),
             nn.BatchNorm2d(out_channels)
         )
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.ReLU(inplace=False)
         
     def forward(self, x) -> torch.Tensor:
         identity = x
         out = self.conv_block(x)
-        out += identity
+        out = out + identity
         out = self.relu(out)
         
         return out

@@ -163,21 +163,19 @@ def flip_board(state: torch.Tensor) -> torch.Tensor:
     return state
 
 def check_end(state: Union[ShogiState, torch.Tensor], actions=None) -> Optional[Union[int, torch.Tensor]]:
-    '''
-    Check assumed valid ShogiState and return -1/0/1 for sente player loss/draw/win or None if game is not over.
-    Also returns actions to avoid recomputation if needed'''
+    '''Check assumed valid ShogiState and return -1/0/1 for sente player loss/draw/win or None if game is not over.'''
     if type(state) == ShogiState:
         state = state.state
 
-    ret_action = False
     if actions is None:
-        ret_action = True
         actions = get_actions(state)
 
     loss_val = -1 if state[-2,0,0] == 0 else 1
     # check for captured king
     if state[0].sum() == 0:
         return loss_val
+    elif state[5].sum() == 0:
+        return -loss_val
     
     # check try rule
     if (state[5] & torch.tensor([[0,0,0],[0,0,0],[0,0,0],[1,1,1]], dtype=bool)).sum() > 0:
@@ -200,9 +198,6 @@ def check_end(state: Union[ShogiState, torch.Tensor], actions=None) -> Optional[
     # check repetition count
     if state[11,0,0]:
         return 0
-    
-    if ret_action:
-        return actions
 
 def execute_action(state: Union[ShogiState, torch.Tensor], state_counts: defaultdict, action: int) -> None:
     '''Given state-action pair (s, a), modify input state to produce resulting state'''
@@ -262,16 +257,25 @@ class ShogiNode(AbstractNode):
         # 1 unit in each cardinal direction and diagonals (8): N, NE, E, SE, S, SW, W, NW
         # Pawn promotion (1)
         # Drop (3): B, R, P
-        self.edges = torch.zeros(size=(4, 12, ROWS, COLS)) # (N,W,Q,P) tuples for action space
+        self.edges = torch.zeros(size=(3, 12, ROWS, COLS)) # (N,W,Q) tuples for action space
         self._state = ShogiState(state)
         self.state = self._state.state
         self.actions = get_actions(self.state)
+        self.prior = None
 
         self.value = check_end(self.state, self.actions)
         self.evaluated = False
 
     def __repr__(self) -> str:
         return self._state.__repr__()
+    
+    def destruct(self) -> None:
+        self.parent = None
+        self.prior, self.value = None, None
+        self.edges, self._state, self.state = None, None, None
+        for _, node in self.children.items():
+            node.destruct()
+        self.children = None
     
     def set_to_start(self) -> None:
         self.parent = None
@@ -290,7 +294,7 @@ class ShogiNode(AbstractNode):
     def select_rollout_action(self, c_puct: float) -> torch.Tensor:
         n_total = self.edges[0].sum()
         c_n = torch.sqrt(n_total) / (1 + self.edges[0])
-        u = c_puct * self.edges[3] * (1 if n_total == 0 else c_n)
+        u = c_puct * self.prior * (1 if n_total == 0 else c_n)
         # assert((self.actions == get_actions(self.state)).all()), 'self.actions is stale'
         if self.state[-2,0,0] == 0:
             a = torch.argmax((self.edges[2]+1)*self.actions + u).item()
@@ -317,7 +321,7 @@ class ShogiNode(AbstractNode):
         p = p_exp / (p_exp*self.actions).sum()
         p[self.actions==0] = 0
         # assert(all(self.actions[p>0])), 'Positive prior assigned to illegal move'
-        self.edges[3] = p
+        self.prior = p
 
         self.evaluated = True
         self.value = v
@@ -343,8 +347,9 @@ class ShogiNode(AbstractNode):
             vec = torch.zeros_like(self.edges[0])
             vec[get_action_index(amax)] = 1
             return vec
-        n = torch.pow(self.edges[0], 1/temp)
-        sv = n / n.sum()
+        with torch.no_grad():
+            n = torch.pow(self.edges[0], 1/temp)
+            sv = n / n.sum()
         # if sv.isnan().any():
         #     import pdb
         #     breakpoint()
