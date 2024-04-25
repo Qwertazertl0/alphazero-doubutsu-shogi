@@ -2,6 +2,7 @@ import torch
 from typing import Optional, Sequence, Union
 from collections import defaultdict
 from mcts import AbstractNode
+from torch.distributions.dirichlet import Dirichlet
 
 TOTAL_NODE_COUNT = 0
 
@@ -10,6 +11,10 @@ ROWS = 4
 COLS = 3
 STATE_PLANES = 18
 META_PLANES = 2
+
+DIRICHLET_ALPHA = 0.5
+DIRICHLET_NOISE_DIST = Dirichlet(torch.ones(12, ROWS, COLS) * DIRICHLET_ALPHA)
+
 class ShogiState():
     '''
     Represents game state using binary/count planes as described in original AlphaZero paper.
@@ -121,8 +126,9 @@ def get_actions(state: Union[ShogiState, torch.Tensor]) -> torch.Tensor:
             action_planes[m] = move_pieces & ~bounds & moveable
 
     # promotions
-    action_planes[8] = empty & state[3]
-    action_planes[0] ^= state[3] & torch.tensor([[0,0,0],[1,1,1],[0,0,0],[0,0,0]], dtype=bool)
+    in_range_mask = torch.tensor([[0,0,0],[1,1,1],[0,0,0],[0,0,0]], dtype=bool)
+    action_planes[8] = action_planes[0] & state[3] & in_range_mask 
+    action_planes[0] ^= action_planes[8]
 
     # drops
     empty_drop = 1-state[:10].sum(dim=0)
@@ -154,7 +160,7 @@ def get_action_str(action: Union[int, tuple]) -> None:
         i = 1 if p in [1, 2, 3] else (0 if p in [0, 4] else -1)
         j = 1 if p in [3, 4, 5] else (0 if p in [2, 6] else -1)
         end = f'to [{r+j},{c+i}]'
-    return f'[{action}] {verb} {piece}{start} {end}'
+    return (f'[{action}]' if type(action)==int else '') + f'{verb} {piece}{start} {end}'
 
 def flip_board(state: torch.Tensor) -> torch.Tensor:
     state[:10,:,:] = torch.flip(state[:10,:,:], dims=[1,2])
@@ -281,7 +287,7 @@ class ShogiNode(AbstractNode):
         self.parent = None
         self.in_action = None
         self.children = {}
-        self.edges = torch.zeros(size=(4, 12, ROWS, COLS))
+        self.edges = torch.zeros(size=(3, 12, ROWS, COLS))
 
         self._state.set_to_start()
         self.actions = get_actions(self.state)
@@ -291,10 +297,11 @@ class ShogiNode(AbstractNode):
     def is_over(self) -> bool:
         return isinstance(self.value, int)
     
-    def select_rollout_action(self, c_puct: float) -> torch.Tensor:
+    def select_rollout_action(self, c_puct: float, alpha: bool = False) -> torch.Tensor:
         n_total = self.edges[0].sum()
         c_n = torch.sqrt(n_total) / (1 + self.edges[0])
-        u = c_puct * self.prior * (1 if n_total == 0 else c_n)
+        dirichlet_noise = DIRICHLET_NOISE_DIST.sample() * self.actions
+        u = c_puct * (self.prior + (dirichlet_noise if alpha else 0)) * (1 if n_total == 0 else c_n)
         # assert((self.actions == get_actions(self.state)).all()), 'self.actions is stale'
         if self.state[-2,0,0] == 0:
             a = torch.argmax((self.edges[2]+1)*self.actions + u).item()
@@ -304,6 +311,9 @@ class ShogiNode(AbstractNode):
         return a
 
     def execute_action(self, action: int, state_counts) -> "AbstractNode":
+        if action in self.children:
+            return self.children[action]
+
         child_state = self.state.clone()
         execute_action(child_state, state_counts, action)
 
@@ -328,6 +338,8 @@ class ShogiNode(AbstractNode):
         return v.item()
     
     def backup(self, value: float, root: "ShogiNode") -> None:
+        if isinstance(value, torch.Tensor):
+            value = value.item()
         self._backup(value, root.__repr__, self.in_action)
 
     def _backup(self, value: float, root_repr: str, in_action: int) -> None:

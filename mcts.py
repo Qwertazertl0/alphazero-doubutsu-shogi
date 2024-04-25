@@ -51,7 +51,7 @@ class MCTS():
             gsc = copy.deepcopy(game_state_counts)
             while not curr_inner.is_over():
                 # Choose action via PUCT algorithm
-                a = curr_inner.select_rollout_action(self.c_puct)
+                a = curr_inner.select_rollout_action(self.c_puct, alpha=(curr_inner==root))
 
                 # Expand and evaluate
                 child = curr_inner.execute_action(a, gsc)

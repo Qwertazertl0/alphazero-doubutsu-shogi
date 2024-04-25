@@ -3,3 +3,4 @@ test.py
 tmp.py
 
 ckpts/
+logs/
